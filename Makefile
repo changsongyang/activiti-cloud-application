@@ -2,6 +2,7 @@ RELEASE_VERSION := $(or $(shell cat VERSION), $(shell python -c "from xml.etree.
 ACTIVITI_CLOUD_FULL_CHART_CHECKOUT_DIR := .git/activiti-cloud-full-chart
 ACTIVITI_CLOUD_FULL_EXAMPLE_DIR := $(ACTIVITI_CLOUD_FULL_CHART_CHECKOUT_DIR)/charts/activiti-cloud-full-example
 ACTIVITI_CLOUD_FULL_CHART_BRANCH := dependency-activiti-cloud-application-$(RELEASE_VERSION)
+ACTIVITI_CLOUD_FULL_CHART_RELEASE_BRANCH := $(or $(ACTIVITI_CLOUD_FULL_CHART_RELEASE_BRANCH),master)
 
 updatebot/push-version:
 	$(eval ACTIVITI_CLOUD_VERSION=$(shell python -c "from xml.etree.ElementTree import parse; print(parse(open('activiti-cloud-dependencies/pom.xml')).find('.//{http://maven.apache.org/POM/4.0.0}activiti-cloud.version').text)"))
@@ -22,23 +23,32 @@ updatebot/push-version:
 
 install: release
 	echo helm $(helm version --short)
+	test $(MESSAGING_BROKER) ||  exit 1
+	test $(MESSAGING_PARTITIONED) ||  exit 1
+
 	cd $(ACTIVITI_CLOUD_FULL_EXAMPLE_DIR) && \
 		helm dep up && \
-		helm upgrade ${PREVIEW_NAMESPACE} . \
+		helm upgrade ${PREVIEW_NAME} . \
 			--install \
 			--set global.gateway.http=false \
 			--set global.gateway.domain=${GLOBAL_GATEWAY_DOMAIN} \
-			--namespace ${PREVIEW_NAMESPACE} \
+			--values $(MESSAGING_BROKER)-values.yaml \
+			--values $(MESSAGING_PARTITIONED)-values.yaml \
+			--namespace ${PREVIEW_NAME} \
 			--create-namespace \
-			--wait
+			--atomic \
+			--timeout 6m
 
 delete:
-	helm uninstall ${PREVIEW_NAMESPACE} --namespace ${PREVIEW_NAMESPACE} || echo "try to remove helm chart"
-	kubectl delete ns ${PREVIEW_NAMESPACE} || echo "try to remove namespace ${PREVIEW_NAMESPACE}"
+	helm uninstall ${PREVIEW_NAME} --namespace ${PREVIEW_NAME} || echo "try to remove helm chart"
+	kubectl delete ns ${PREVIEW_NAME} || echo "try to remove namespace ${PREVIEW_NAME}"
 
 clone-chart:
 	rm -rf $(ACTIVITI_CLOUD_FULL_CHART_CHECKOUT_DIR) && \
-		git clone https://${GITHUB_TOKEN}@github.com/Activiti/activiti-cloud-full-chart.git $(ACTIVITI_CLOUD_FULL_CHART_CHECKOUT_DIR) --depth 1
+		git clone https://${GITHUB_TOKEN}@github.com/Activiti/activiti-cloud-full-chart.git \
+			--branch $(ACTIVITI_CLOUD_FULL_CHART_RELEASE_BRANCH) \
+			$(ACTIVITI_CLOUD_FULL_CHART_CHECKOUT_DIR) \
+			--depth 1
 
 create-pr: update-chart
 	cd $(ACTIVITI_CLOUD_FULL_CHART_CHECKOUT_DIR) && \
@@ -53,7 +63,7 @@ create-pr: update-chart
 update-chart: clone-chart
 	$(eval FRONTEND_VERSION ?= master)
 	cd $(ACTIVITI_CLOUD_FULL_EXAMPLE_DIR) && \
-		yq write --inplace Chart.yaml 'version' $(RELEASE_VERSION) && \
+		env VERSION=$(RELEASE_VERSION) make version && \
 		env BACKEND_VERSION=$(RELEASE_VERSION) FRONTEND_VERSION=$(FRONTEND_VERSION) make update-docker-images
 
 release: update-chart
@@ -67,8 +77,7 @@ release: update-chart
 
 mvn/%:
 	$(eval MODULE=$(word 1, $(subst mvn/, ,$@)))
-
-	mvn ${MAVEN_CLI_OPTS} verify -pl $(MODULE) -am
+	cd $(MODULE) &&	mvn ${MAVEN_CLI_OPTS} verify
 
 docker/%:
 	$(eval MODULE=$(word 1, $(subst docker/, ,$@)))
